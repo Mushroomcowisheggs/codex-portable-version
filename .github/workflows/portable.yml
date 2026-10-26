@@ -1,0 +1,79 @@
+name: Build Codex portable bundles
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact openai/codex release tag (blank uses latest)
+        required: false
+        default: ""
+        type: string
+  push:
+    tags:
+      - "portable-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-release:
+    name: Resolve upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Resolve release tag once for the matrix
+        id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$REQUESTED_TAG" ]; then
+            echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          else
+            tag=$(python3 - <<'PY'
+          import json
+          import urllib.request
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/openai/codex/releases/latest",
+              headers={"Accept": "application/vnd.github+json", "User-Agent": "codex-portable-workflow"},
+          )
+          with urllib.request.urlopen(request) as response:
+              print(json.load(response)["tag_name"])
+          PY
+            )
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Using upstream release: $(grep '^tag=' "$GITHUB_OUTPUT" | cut -d= -f2-)"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux-x86_64
+          - linux-aarch64
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64
+          - windows-aarch64
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Build portable bundle
+        run: |
+          python3 portable/make_portable.py \
+            --target "${{ matrix.target }}" \
+            --release-tag "${{ needs.resolve-release.outputs.tag }}" \
+            --output dist
+
+      - name: Upload bundle and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-portable-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error

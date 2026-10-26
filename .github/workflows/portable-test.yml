@@ -1,0 +1,31 @@
+name: Test Codex portable maker
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "portable/**"
+      - ".github/workflows/portable.yml"
+      - ".github/workflows/portable-test.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "portable/**"
+      - ".github/workflows/portable.yml"
+      - ".github/workflows/portable-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+      - name: Compile maker and tests
+        run: python3 -m py_compile portable/make_portable.py portable/test_make_portable.py
+      - name: Run maker tests
+        run: python3 -m unittest portable/test_make_portable.py
