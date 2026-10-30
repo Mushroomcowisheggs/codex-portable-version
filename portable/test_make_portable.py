@@ -70,7 +70,7 @@ class PortableMakerTests(unittest.TestCase):
                 config = archive.extractfile(
                     f"{root_name}/data/codex/config.toml"
                 ).read().decode("utf-8")
-                self.assertIn("daemon_auto_start = false", config)
+                self.assertEqual(config, "[features]\ndaemon_auto_start = false\n")
                 self.assertEqual(
                     archive.getmember(f"{root_name}/run.sh").mode & 0o111,
                     0o111,

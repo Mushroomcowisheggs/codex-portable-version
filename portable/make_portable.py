@@ -525,7 +525,7 @@ def make_bundle(
             shutil.copy2(binary, destination_binary)
             write_text(
                 stage / "data" / "codex" / "config.toml",
-                "[features]\\ndaemon_auto_start = false\\n",
+                "[features]\ndaemon_auto_start = false\n",
             )
         else:
             _copy_runtime_tree(runtime_root, package_stage)
@@ -569,7 +569,7 @@ def make_bundle(
             "sqlite_home": "data/codex/state",
             "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         }
-        write_text(stage / "manifest.json", json.dumps(manifest, indent=2) + "\\n")
+        write_text(stage / "manifest.json", json.dumps(manifest, indent=2) + "\n")
         write_text(
             stage / "README.md",
             bundle_readme(release, target, asset, binary_digest, repository, package_layout),
@@ -585,7 +585,7 @@ def make_bundle(
             add_tar_archive(stage, archive_path, bundle_name, target)
 
     checksum_path = output_root / f"{archive_path.name}.sha256"
-    write_text(checksum_path, f"{sha256(archive_path)}  {archive_path.name}\\n")
+    write_text(checksum_path, f"{sha256(archive_path)}  {archive_path.name}\n")
     return archive_path
 
 
