@@ -38,7 +38,7 @@ jobs:
               "https://api.github.com/repos/openai/codex/releases/latest",
               headers={"Accept": "application/vnd.github+json", "User-Agent": "codex-portable-workflow"},
           )
-          with urllib.request.urlopen(request) as response:
+          with urllib.request.urlopen(request, timeout=120) as response:
               print(json.load(response)["tag_name"])
           PY
             )
@@ -77,3 +77,26 @@ jobs:
           name: codex-portable-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  release:
+    name: Publish tagged portable release
+    if: startsWith(github.ref, 'refs/tags/portable-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all target bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-portable-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Codex portable $GITHUB_REF_NAME" \
+            --generate-notes

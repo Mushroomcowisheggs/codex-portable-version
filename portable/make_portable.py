@@ -22,10 +22,12 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 UPSTREAM_REPOSITORY = os.environ.get("CODEX_PORTABLE_UPSTREAM", "openai/codex")
 GITHUB_API = "https://api.github.com"
+NETWORK_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class Target:
     name: str
     os_name: str
     architecture: str
+    upstream_target: str
     asset_names: tuple[str, ...]
     binary_name: str
     archive_suffix: str
@@ -43,6 +46,7 @@ TARGETS: dict[str, Target] = {
         "linux-x86_64",
         "linux",
         "x86_64",
+        "x86_64-unknown-linux-musl",
         ("codex-package-x86_64-unknown-linux-musl.tar.gz",),
         "codex",
         ".tar.gz",
@@ -51,6 +55,7 @@ TARGETS: dict[str, Target] = {
         "linux-aarch64",
         "linux",
         "aarch64",
+        "aarch64-unknown-linux-musl",
         ("codex-package-aarch64-unknown-linux-musl.tar.gz",),
         "codex",
         ".tar.gz",
@@ -59,6 +64,7 @@ TARGETS: dict[str, Target] = {
         "macos-x86_64",
         "macos",
         "x86_64",
+        "x86_64-apple-darwin",
         ("codex-package-x86_64-apple-darwin.tar.gz",),
         "codex",
         ".tar.gz",
@@ -67,6 +73,7 @@ TARGETS: dict[str, Target] = {
         "macos-aarch64",
         "macos",
         "aarch64",
+        "aarch64-apple-darwin",
         ("codex-package-aarch64-apple-darwin.tar.gz",),
         "codex",
         ".tar.gz",
@@ -75,6 +82,7 @@ TARGETS: dict[str, Target] = {
         "windows-x86_64",
         "windows",
         "x86_64",
+        "x86_64-pc-windows-msvc",
         ("codex-package-x86_64-pc-windows-msvc.tar.gz",),
         "codex.exe",
         ".zip",
@@ -83,6 +91,7 @@ TARGETS: dict[str, Target] = {
         "windows-aarch64",
         "windows",
         "aarch64",
+        "aarch64-pc-windows-msvc",
         ("codex-package-aarch64-pc-windows-msvc.tar.gz",),
         "codex.exe",
         ".zip",
@@ -92,18 +101,43 @@ TARGETS: dict[str, Target] = {
 UNIX_LAUNCHER = """#!/usr/bin/env sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT=$0
+case "$SCRIPT" in
+  /*) ;;
+  *) SCRIPT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)/$(basename -- "$SCRIPT");;
+esac
+while [ -L "$SCRIPT" ]; do
+  LINK=$(readlink "$SCRIPT")
+  case "$LINK" in
+    /*) SCRIPT=$LINK ;;
+    *) SCRIPT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)/$LINK ;;
+  esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)
 CODEX_HOME="$ROOT/data/codex"
-mkdir -p "$CODEX_HOME"
-export CODEX_HOME
+CODEX_SQLITE_HOME="$CODEX_HOME/state"
+mkdir -p "$CODEX_HOME" "$CODEX_SQLITE_HOME"
+export CODEX_HOME CODEX_SQLITE_HOME
 
-exec "$ROOT/bin/codex" "$@"
+exec "$ROOT/codex-package/bin/codex" "$@"
 """
 
 MACOS_LAUNCHER = """#!/usr/bin/env sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT=$0
+case "$SCRIPT" in
+  /*) ;;
+  *) SCRIPT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)/$(basename -- "$SCRIPT");;
+esac
+while [ -L "$SCRIPT" ]; do
+  LINK=$(readlink "$SCRIPT")
+  case "$LINK" in
+    /*) SCRIPT=$LINK ;;
+    *) SCRIPT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)/$LINK ;;
+  esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT")" && pwd)
 exec "$ROOT/run.sh" "$@"
 """
 
@@ -111,16 +145,19 @@ WINDOWS_LAUNCHER = r'''@echo off
 setlocal
 set "ROOT=%~dp0"
 set "CODEX_HOME=%ROOT%data\codex"
+set "CODEX_SQLITE_HOME=%CODEX_HOME%\state"
 if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
-"%ROOT%bin\codex.exe" %*
+if not exist "%CODEX_SQLITE_HOME%" mkdir "%CODEX_SQLITE_HOME%"
+"%ROOT%codex-package\bin\codex.exe" %*
 exit /b %ERRORLEVEL%
 '''
 
 POWERSHELL_LAUNCHER = r'''$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $env:CODEX_HOME = Join-Path $root "data\codex"
-New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
-& (Join-Path $root "bin\codex.exe") @args
+$env:CODEX_SQLITE_HOME = Join-Path $env:CODEX_HOME "state"
+New-Item -ItemType Directory -Force -Path $env:CODEX_HOME, $env:CODEX_SQLITE_HOME | Out-Null
+& (Join-Path $root "codex-package\bin\codex.exe") @args
 exit $LASTEXITCODE
 '''
 
@@ -133,7 +170,7 @@ def github_json(url: str) -> Any:
             "User-Agent": "codex-portable-maker",
         },
     )
-    with urllib.request.urlopen(request) as response:
+    with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
         return json.load(response)
 
 
@@ -226,8 +263,55 @@ def sha256(path: Path) -> str:
 
 def download(url: str, destination: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "codex-portable-maker"})
-    with urllib.request.urlopen(request) as response, destination.open("wb") as output:
+    with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
+
+
+
+def expected_package_entrypoint(target: Target) -> str:
+    return f"bin/{target.binary_name}"
+
+
+def required_package_files(target: Target) -> tuple[Path, ...]:
+    files = [
+        Path("bin") / target.binary_name,
+        Path("bin") / ("codex-code-mode-host.exe" if target.os_name == "windows" else "codex-code-mode-host"),
+        Path("codex-path") / ("rg.exe" if target.os_name == "windows" else "rg"),
+    ]
+    if target.os_name == "linux":
+        files.append(Path("codex-resources") / "bwrap")
+    if target.os_name == "windows":
+        files.extend(
+            [
+                Path("codex-resources") / "codex-command-runner.exe",
+                Path("codex-resources") / "codex-windows-sandbox-setup.exe",
+            ]
+        )
+    return tuple(files)
+
+
+def validate_package_root(root: Path, target: Target) -> None:
+    metadata_path = root / "codex-package.json"
+    if not metadata_path.is_file():
+        raise RuntimeError(f"Missing package metadata: {metadata_path}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Invalid package metadata: {metadata_path}") from error
+    expected_entrypoint = expected_package_entrypoint(target)
+    if metadata.get("entrypoint") != expected_entrypoint:
+        raise RuntimeError(
+            f"Package entrypoint must be {expected_entrypoint!r}; "
+            f"got {metadata.get('entrypoint')!r}"
+        )
+    package_target = metadata.get("target")
+    if package_target is not None and package_target != target.upstream_target:
+        raise RuntimeError(
+            f"Package target must be {target.upstream_target!r}; got {package_target!r}"
+        )
+    for relative_path in required_package_files(target):
+        if not (root / relative_path).is_file():
+            raise RuntimeError(f"Missing package file: {relative_path}")
 
 
 def _safe_destination(root: Path, member_name: str) -> Path:
@@ -245,7 +329,10 @@ def _extract_tar(archive: Path, destination: Path) -> None:
             _safe_destination(destination, member.name)
             if member.issym() or member.islnk() or member.isdev():
                 raise RuntimeError(f"Archive contains an unsupported link/device: {member.name!r}")
-        stream.extractall(destination)
+        if sys.version_info >= (3, 12):
+            stream.extractall(destination, filter="data")
+        else:
+            stream.extractall(destination)
 
 
 def _extract_zip(archive: Path, destination: Path) -> None:
@@ -330,12 +417,43 @@ def bundle_readme(
     package_layout: str,
 ) -> str:
     package_note = (
-        "The official package layout is preserved, including the code-mode host, "
-        "platform sandbox helpers, and bundled ripgrep."
+        "The official package layout is preserved under 'codex-package/', including "
+        "the code-mode host, platform sandbox helpers, and bundled ripgrep."
         if package_layout == "official-codex-package"
-        else "This local bundle contains only the supplied entrypoint and is intended for maker smoke tests."
+        else "This local bundle contains only the supplied entrypoint. Daemon auto-start is disabled "
+        "because an entrypoint-only smoke bundle has no complete official package."
     )
-    return f"""# Codex Portable\n\nThis bundle contains the official Codex CLI binary for **{target.name}**.\n\n- Upstream: https://github.com/{repository}\n- Release: `{release.get('tag_name', 'local')}`\n- Source asset: `{asset.get('name', 'local binary')}`\n- Binary SHA-256: `{binary_digest}`\n\n## Run\n\nUse `run.sh` on Linux/macOS, `run.command` on macOS, `run.bat` on Windows, or\n`run.ps1` from PowerShell. The launcher sets `CODEX_HOME` to `data/codex`, so\nlogin data, configuration, history, and the local state database stay beside the\nbinary instead of being written to the host user's home directory.\n\nThe current working directory is preserved; launch the bundle from the project\nyou want Codex to work on. Arguments are passed through unchanged.\n\n{package_note} This is a packaging layer around upstream Codex; it does not patch\nor replace Codex source code. OS capabilities required by upstream Codex (for\nexample a usable terminal and any platform sandbox support) still apply.\n"""
+    return f"""# Codex Portable
+
+This bundle contains the official Codex CLI binary for **{target.name}**.
+
+- Upstream: https://github.com/{repository}
+- Release: '{release.get('tag_name', 'local')}'
+- Source asset: '{asset.get('name', 'local binary')}'
+- Binary SHA-256: '{binary_digest}'
+
+## Run
+
+Use 'run.sh' on Linux/macOS, 'run.command' on macOS, 'run.bat' on Windows, or
+'run.ps1' from PowerShell. The launcher sets CODEX_HOME to 'data/codex' and
+CODEX_SQLITE_HOME to 'data/codex/state'. The package is in 'codex-package/',
+so the daemon can keep its managed installation beside the package rather than
+inside it.
+
+The current working directory is preserved; launch the bundle from the project
+you want Codex to work on. Arguments are passed through unchanged.
+
+{package_note}
+
+This is a packaging layer around upstream Codex; it does not patch or replace
+Codex source code. The bundle still uses host operating-system integrations:
+OS keyrings, host git and shells, plugin/runtime caches, user skills, Windows
+sandbox provisioning, and platform signing or notarization remain host concerns.
+The Windows daemon must be started from a non-elevated terminal. Rebuild the
+bundle with a new pinned release to upgrade it; no in-place updater is enabled.
+"""
+
+
 
 
 def copy_legal_files(repository_root: Path, destination: Path) -> None:
@@ -343,6 +461,37 @@ def copy_legal_files(repository_root: Path, destination: Path) -> None:
         source = repository_root / name
         if source.is_file():
             shutil.copy2(source, destination / name)
+
+
+def should_have_execute_bit(relative_path: str, target: Target) -> bool:
+    if target.os_name == "windows":
+        return False
+    path = PurePosixPath(relative_path)
+    if path in {PurePosixPath("run.sh"), PurePosixPath("run.command")}:
+        return True
+    if not path.parts or path.parts[0] != "codex-package":
+        return False
+    package_path = PurePosixPath(*path.parts[1:])
+    if package_path.parts and package_path.parts[0] in {"bin", "codex-path"}:
+        return True
+    if package_path == PurePosixPath("codex-resources/bwrap"):
+        return True
+    return (
+        len(package_path.parts) >= 3
+        and package_path.parts[:3] == ("codex-resources", "voice", "bin")
+    )
+
+
+def add_tar_archive(stage: Path, archive_path: Path, bundle_name: str, target: Target) -> None:
+    def archive_filter(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        prefix = f"{bundle_name}/"
+        relative = member.name.removeprefix(prefix)
+        if member.isfile() and should_have_execute_bit(relative, target):
+            member.mode = 0o755
+        return member
+
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.add(stage, arcname=bundle_name, filter=archive_filter)
 
 
 def make_bundle(
@@ -356,23 +505,40 @@ def make_bundle(
     repository: str,
 ) -> Path:
     tag = str(release.get("tag_name") or "local")
-    safe_tag = "".join(character if character.isalnum() or character in ".-_" else "-" for character in tag)
+    safe_tag = "".join(
+        character if character.isalnum() or character in ".-_" else "-"
+        for character in tag
+    )
     bundle_name = f"codex-portable-{safe_tag}-{target.name}"
     output_root.mkdir(parents=True, exist_ok=True)
     archive_path = output_root / f"{bundle_name}{target.archive_suffix}"
 
     with tempfile.TemporaryDirectory(prefix="codex-portable-") as temporary:
         stage = Path(temporary) / bundle_name
+        package_stage = stage / "codex-package"
         (stage / "data" / "codex").mkdir(parents=True)
+        package_stage.mkdir(parents=True)
+
         if runtime_root is None:
-            destination_binary = stage / "bin" / target.binary_name
+            destination_binary = package_stage / "bin" / target.binary_name
             destination_binary.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(binary, destination_binary)
+            write_text(
+                stage / "data" / "codex" / "config.toml",
+                "[features]\\ndaemon_auto_start = false\\n",
+            )
         else:
-            _copy_runtime_tree(runtime_root, stage)
-            destination_binary = _find_binary(stage, target.binary_name)
+            _copy_runtime_tree(runtime_root, package_stage)
+            validate_package_root(package_stage, target)
+            destination_binary = _find_binary(package_stage, target.binary_name)
+
         if target.os_name != "windows":
-            destination_binary.chmod(destination_binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            destination_binary.chmod(
+                destination_binary.stat().st_mode
+                | stat.S_IXUSR
+                | stat.S_IXGRP
+                | stat.S_IXOTH
+            )
 
         if target.os_name == "windows":
             write_text(stage / "run.bat", WINDOWS_LAUNCHER)
@@ -383,22 +549,27 @@ def make_bundle(
                 write_text(stage / "run.command", MACOS_LAUNCHER, executable=True)
 
         binary_digest = sha256(destination_binary)
+        package_layout = (
+            "official-codex-package" if runtime_root is not None else "entrypoint-only"
+        )
         manifest = {
-            "format_version": 1,
+            "format_version": 2,
             "upstream_repository": repository,
             "release_tag": release.get("tag_name"),
             "release_url": release.get("html_url"),
             "target": target.name,
-            "package_layout": "official-codex-package" if runtime_root is not None else "entrypoint-only",
+            "upstream_target": target.upstream_target,
+            "package_root": "codex-package",
+            "package_layout": package_layout,
             "asset": asset.get("name"),
             "asset_url": asset.get("browser_download_url"),
             "asset_digest": asset.get("digest"),
             "binary_sha256": binary_digest,
             "portable_home": "data/codex",
+            "sqlite_home": "data/codex/state",
             "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         }
-        write_text(stage / "manifest.json", json.dumps(manifest, indent=2) + "\n")
-        package_layout = "official-codex-package" if runtime_root is not None else "entrypoint-only"
+        write_text(stage / "manifest.json", json.dumps(manifest, indent=2) + "\\n")
         write_text(
             stage / "README.md",
             bundle_readme(release, target, asset, binary_digest, repository, package_layout),
@@ -411,12 +582,13 @@ def make_bundle(
                     if path.is_file():
                         archive.write(path, path.relative_to(stage.parent))
         else:
-            with tarfile.open(archive_path, "w:gz") as archive:
-                archive.add(stage, arcname=bundle_name)
+            add_tar_archive(stage, archive_path, bundle_name, target)
 
     checksum_path = output_root / f"{archive_path.name}.sha256"
-    write_text(checksum_path, f"{sha256(archive_path)}  {archive_path.name}\n")
+    write_text(checksum_path, f"{sha256(archive_path)}  {archive_path.name}\\n")
     return archive_path
+
+
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -432,6 +604,7 @@ def build(args: argparse.Namespace) -> Path:
         runtime_root = Path(args.package_dir).expanduser().resolve()
         if not runtime_root.is_dir():
             raise FileNotFoundError(runtime_root)
+        validate_package_root(runtime_root, target)
         binary = _find_binary(runtime_root, target.binary_name)
         release = {
             "tag_name": args.release_tag or "local",
@@ -497,6 +670,8 @@ def build(args: argparse.Namespace) -> Path:
                 raise RuntimeError(
                     f"Official package asset {asset['name']} did not contain the expected package layout"
                 )
+            if runtime_root is not None:
+                validate_package_root(runtime_root, target)
             return make_bundle(
                 target,
                 release,
@@ -527,6 +702,9 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if sys.version_info < (3, 10):
+        print("codex portable maker requires Python 3.10 or newer", file=sys.stderr)
+        return 2
     try:
         result = build(args)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

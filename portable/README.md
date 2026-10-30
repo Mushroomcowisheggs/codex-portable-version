@@ -1,54 +1,76 @@
 # Codex portable maker
 
-This directory is an additive packaging layer for the official `openai/codex` fork. It deliberately does not patch Codex source files, add a second runtime, or modify upstream build targets. When the fork is updated from upstream, the portable layer remains a small, isolated directory that can be reviewed independently.
+This directory is an additive packaging layer for the official 'openai/codex' fork. It does not patch Codex source files or replace upstream build targets. When the fork is updated from upstream, this layer can be reviewed independently.
 
 ## Build a bundle
 
-The maker uses the latest official `codex-package-*` release asset for the selected target. These archives contain the upstream entrypoint together with the code-mode host, ripgrep, and platform sandbox helpers:
+The maker uses the latest official 'codex-package-*' release asset for the selected target. The generated bundle keeps the executable package and portable state as siblings:
 
-```bash
+~~~text
+codex-portable-<release>-<target>/
+  codex-package/       # upstream bin/, codex-resources/, codex-path/, metadata
+  data/codex/          # CODEX_HOME and SQLite state
+  run.sh / run.command / run.bat / run.ps1
+  manifest.json
+~~~
+
+This layout is required by upstream's daemon installer: CODEX_HOME must be outside the source CLI package.
+
+~~~bash
 python3 portable/make_portable.py --target linux-x86_64 --output dist
 python3 portable/make_portable.py --target macos-aarch64 --output dist
 python3 portable/make_portable.py --target windows-x86_64 --output dist
-```
+~~~
 
-Use `--release-tag rust-v0.164.0` to pin an exact upstream release. To wrap an already assembled official package directory without downloading anything:
+Use --release-tag rust-v0.164.0 to pin an exact upstream release. The maker verifies the release asset digest when GitHub provides one and validates the official package metadata and required helper files before packaging.
 
-```bash
+To wrap an already assembled official package directory without downloading anything:
+
+~~~bash
 just assemble-codex-package --target x86_64-unknown-linux-musl --cargo-profile release \
   --package-dir /tmp/codex-package
 python3 portable/make_portable.py \
   --target linux-x86_64 \
   --package-dir /tmp/codex-package \
   --output dist
-```
+~~~
 
-The generated archive preserves the official package layout, then adds a launcher, `manifest.json`, and the upstream license files when present. The launcher creates `data/codex/` and sets `CODEX_HOME` to it, so authentication, configuration, history, skills, and state stay with the bundle. The caller's working directory and command-line arguments are preserved.
+--package-dir expects the canonical package layout containing codex-package.json, bin/, codex-resources/, and codex-path/. A WinGet-style root executable is not accepted by this mode; use --binary for an entrypoint-only smoke bundle.
+
+The launcher sets CODEX_HOME to data/codex and CODEX_SQLITE_HOME to data/codex/state. It preserves the caller's working directory and command-line arguments. Unix launchers resolve symlinks before locating the bundle, so a run.sh or run.command link in PATH remains usable.
 
 Supported targets are:
 
-- `linux-x86_64`
-- `linux-aarch64`
-- `macos-x86_64`
-- `macos-aarch64`
-- `windows-x86_64`
-- `windows-aarch64`
+- linux-x86_64
+- linux-aarch64
+- macos-x86_64
+- macos-aarch64
+- windows-x86_64
+- windows-aarch64
 
-The official release assets are preferred over source compilation because they follow the upstream release process and avoid adding portable-specific changes to the Codex build. The workflow in `.github/workflows/portable.yml` builds all six bundles from one pinned upstream release and publishes them as workflow artifacts. `--binary` remains available for a small entrypoint-only smoke bundle; use `--package-dir` for a functional local package with all upstream helpers.
+The maker requires Python 3.10 or newer. --binary and --source-dir create entrypoint-only smoke bundles; these include daemon_auto_start = false because they do not contain the complete official package required by the daemon installer. Use --package-dir for a functional local package with all upstream helpers.
 
 ## Keeping the fork current
 
-The fork currently tracks `openai/codex`. Keep the upstream update separate from portable changes:
+The fork currently tracks openai/codex. Keep the upstream update separate from portable changes:
 
-```bash
+~~~bash
 git remote add upstream https://github.com/openai/codex.git  # once
 git fetch upstream main
 git checkout main
 git merge --ff-only upstream/main
-```
+~~~
 
-Portable behavior is owned only by `portable/` and the additive workflow. This makes an upstream fast-forward easy to review and keeps conflicts out of Codex source files.
+Portable behavior is owned only by portable/ and the additive workflows. Rebuild with a new pinned upstream release to upgrade a bundle; the bundle deliberately does not run the upstream in-place updater.
 
-## Scope and limitations
+## Portability boundary
 
-The bundle removes the Node.js/Rust requirement for users because it carries a compiled Codex binary. It still relies on the operating-system capabilities required by that upstream binary, including a usable terminal and any platform sandbox support. No device binding, system-directory symlink, or host configuration migration is performed.
+The bundle carries the compiled Codex package and its upstream helper binaries, so users do not need Node.js or Rust. Some behavior remains an operating-system integration:
+
+- credentials may use the host OS keyring, depending on Codex configuration;
+- host git, shells, user skills, plugin/runtime caches, and PowerShell remain host-provided;
+- Windows sandbox provisioning is a machine-level setup and may require administrator approval;
+- the Windows daemon must be started from a non-elevated terminal;
+- macOS notarization and Windows Authenticode signing are not performed by this maker.
+
+The portable promise is package and Codex state relocation. It does not claim to replace the host operating system or its security services.
