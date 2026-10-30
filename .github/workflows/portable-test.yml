@@ -1,0 +1,48 @@
+name: Test Codex portable maker
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "portable/**"
+      - ".github/workflows/portable.yml"
+      - ".github/workflows/portable-test.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "portable/**"
+      - ".github/workflows/portable.yml"
+      - ".github/workflows/portable-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+      - name: Compile maker and tests
+        run: python3 -m py_compile portable/make_portable.py portable/test_make_portable.py
+      - name: Run maker tests
+        run: python3 -m unittest portable/test_make_portable.py
+
+  official-linux-smoke:
+    name: Official Linux package smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+      - name: Build current official package
+        run: python3 portable/make_portable.py --target linux-x86_64 --output dist
+      - name: Run the bundled binary
+        run: |
+          archive=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          mkdir extracted
+          tar -xzf "$archive" -C extracted
+          bundle=$(find extracted -mindepth 1 -maxdepth 1 -type d -print -quit)
+          "$bundle/run.sh" --version
